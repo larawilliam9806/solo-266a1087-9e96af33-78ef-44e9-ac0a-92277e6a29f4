@@ -28,6 +28,10 @@ class ConflictError(ServiceError):
     code = "conflict"
 
 
+class RevisionConflictError(ConflictError):
+    code = "revision_conflict"
+
+
 class ContentMismatchError(ConflictError):
     code = "duplicate_serial_conflict"
 

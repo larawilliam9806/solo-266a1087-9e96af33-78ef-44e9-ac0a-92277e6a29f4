@@ -57,9 +57,14 @@ CREATE TABLE IF NOT EXISTS sales (
     store_id             TEXT NOT NULL REFERENCES stores(store_id),
     business_date        TEXT NOT NULL,
     amount_cents         INTEGER NOT NULL,
-    -- Hash of serial/store/date/amount; used to tell an identical retry from
-    -- a conflicting reuse of the same serial number.
+    -- Hash of the originally imported serial/store/date/amount; used to tell
+    -- an identical retry from a conflicting reuse of the same serial number.
+    -- Corrections deliberately do NOT rewrite it, so re-sending the original
+    -- import stays a duplicate instead of undoing the correction.
     content_hash         TEXT NOT NULL,
+    -- Optimistic-concurrency revision.  Starts at 1 for every imported sale
+    -- and is incremented by each accepted correction.
+    revision             INTEGER NOT NULL DEFAULT 1,
     region_code          TEXT,
     attribution_status   TEXT NOT NULL CHECK (
         attribution_status IN ('attributed', 'pending')
@@ -128,6 +133,15 @@ CREATE TABLE IF NOT EXISTS backfill_items (
 PRAGMA user_version = 1;
 """
 
+# Schema migrations applied on top of ``SCHEMA`` for databases created by an
+# older release.  ``init_db`` runs them idempotently, so a fresh database (which
+# already has the column via ``SCHEMA``) is a no-op.
+MIGRATIONS: tuple[tuple[str, str], ...] = (
+    # (column added, DDL) — Revision 1: optimistic-concurrency corrections per
+    # serial number.
+    ("revision", "ALTER TABLE sales ADD COLUMN revision INTEGER NOT NULL DEFAULT 1"),
+)
+
 
 def utc_now_iso() -> str:
     """UTC timestamp with millisecond precision, sortable as text."""
@@ -156,6 +170,24 @@ def connect(path: str) -> sqlite3.Connection:
 
 def init_db(conn: sqlite3.Connection) -> None:
     conn.executescript(SCHEMA)
+    _migrate(conn)
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Bring a pre-existing database up to the current schema.
+
+    ``ALTER TABLE ... ADD COLUMN`` has no ``IF NOT EXISTS`` in SQLite, so we
+    re-inspect under the write lock; a concurrent process that won the race has
+    already added the column by the time we look.
+    """
+    with write_tx(conn):
+        columns = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(sales)").fetchall()
+        }
+        for column, statement in MIGRATIONS:
+            if column not in columns:
+                conn.execute(statement)
 
 
 @contextmanager

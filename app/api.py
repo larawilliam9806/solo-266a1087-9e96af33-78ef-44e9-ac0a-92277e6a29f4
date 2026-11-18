@@ -12,9 +12,10 @@ from fastapi.responses import JSONResponse
 
 from . import backfill
 from .config import Settings
+from .corrections import correct_sale
 from .dates import parse_business_date
 from .db import connect, init_db
-from .errors import NotFoundError, ServiceError, ValidationError
+from .errors import NotFoundError, RevisionConflictError, ServiceError, ValidationError
 from .models import (
     BackfillTaskOut,
     HealthResponse,
@@ -22,6 +23,7 @@ from .models import (
     RegionTableOut,
     RegionTableReplaceRequest,
     RegionTableReplaceResponse,
+    SaleCorrectionRequest,
     SaleOut,
     SaleQueryResponse,
     SalesImportRequest,
@@ -31,6 +33,13 @@ from .sales import import_sales
 from .worker import Worker
 
 logger = logging.getLogger("retail.api")
+
+
+def _sale_snapshot(conn: sqlite3.Connection, serial_no: str) -> dict | None:
+    row = conn.execute(
+        "SELECT * FROM sales WHERE serial_no = ?", (serial_no,)
+    ).fetchone()
+    return SaleOut.from_row(row).model_dump() if row is not None else None
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -208,6 +217,35 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise NotFoundError(
                 "sale not found", detail={"serial_no": serial_no}
             )
+        return SaleOut.from_row(row)
+
+    @app.patch(
+        "/api/v1/sales/{serial_no}",
+        response_model=SaleOut,
+        tags=["sales"],
+        summary="按流水号更正销售门店/营业日/金额",
+        description=(
+            "必须携带查询时看到的 revision（存量记录从 1 开始）。"
+            "revision 与当前不一致时返回 409 revision_conflict，且不改变销售与回填状态；"
+            "成功后 revision 递增。同一版本的并发更正只有一份会被接受。"
+            "更正立即按目标门店当前生效的区域有效期表重新归属，无匹配则为待归属。"
+            "进行中的回填任务会同步调整暂存结果：原门店任务不再改写该笔，"
+            "新门店任务（即使游标已越过该 ID）也会采用更正后的数据；"
+            "其它销售的回填进度不受影响。"
+        ),
+    )
+    def correct_sale_endpoint(
+        serial_no: str,
+        payload: SaleCorrectionRequest,
+        conn: sqlite3.Connection = Depends(get_conn),
+    ):
+        correction = payload.normalised(serial_no)
+        try:
+            row = correct_sale(conn, serial_no, correction)
+        except RevisionConflictError as exc:
+            # Tell the client which revision it should retry against.
+            exc.detail.setdefault("sale", _sale_snapshot(conn, serial_no))
+            raise
         return SaleOut.from_row(row)
 
     @app.put(

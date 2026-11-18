@@ -9,7 +9,14 @@ from __future__ import annotations
 
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, Field, StringConstraints, model_validator
+from pydantic import (
+    AliasChoices,
+    BaseModel,
+    ConfigDict,
+    Field,
+    StringConstraints,
+    model_validator,
+)
 
 from .dates import format_cents, parse_amount_cents, parse_business_date
 from .errors import ValidationError
@@ -40,6 +47,48 @@ class SaleIn(BaseModel):
 
 class NormalisedSale(BaseModel):
     serial_no: str
+    store_id: str
+    business_date: str
+    amount_cents: int
+
+
+class SaleCorrectionRequest(BaseModel):
+    """Correct an already-imported sale.
+
+    ``revision`` is the revision the caller observed when reading the sale
+    (1 for a freshly imported record).  A correction only applies if the stored
+    revision still matches, which makes concurrent corrections of the same
+    version mutually exclusive.  ``expected_revision`` is accepted as an alias.
+    """
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    revision: int = Field(
+        ge=1,
+        validation_alias=AliasChoices("revision", "expected_revision"),
+        description="Revision the caller observed",
+    )
+    store_id: NonEmptyStr
+    business_date: str = Field(description="ISO business date YYYY-MM-DD")
+    amount: str | int | float = Field(
+        description="Corrected sale amount; max 2 decimal places"
+    )
+
+    def normalised(self, serial_no: str) -> "NormalisedCorrection":
+        business_date = parse_business_date(self.business_date)
+        cents = parse_amount_cents(self.amount)
+        return NormalisedCorrection(
+            serial_no=serial_no,
+            revision=self.revision,
+            store_id=self.store_id,
+            business_date=business_date.isoformat(),
+            amount_cents=cents,
+        )
+
+
+class NormalisedCorrection(BaseModel):
+    serial_no: str
+    revision: int
     store_id: str
     business_date: str
     amount_cents: int
@@ -88,6 +137,10 @@ class SaleImportItem(BaseModel):
     serial_no: str
     status: Literal["inserted_attributed", "inserted_pending", "duplicate", "rejected"]
     region_code: str | None = None
+    revision: int | None = Field(
+        default=None,
+        description="Current revision of the stored sale (1 for a new import)",
+    )
     message: str | None = None
 
 
@@ -165,6 +218,7 @@ class SaleOut(BaseModel):
     business_date: str
     amount: str
     amount_cents: int
+    revision: int
     region_code: str | None
     attribution_status: Literal["attributed", "pending"]
     attribution_table_id: int | None
@@ -179,6 +233,7 @@ class SaleOut(BaseModel):
             business_date=row["business_date"],
             amount=format_cents(row["amount_cents"]),
             amount_cents=row["amount_cents"],
+            revision=row["revision"],
             region_code=row["region_code"],
             attribution_status=row["attribution_status"],
             attribution_table_id=row["attribution_table_id"],

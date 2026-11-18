@@ -16,6 +16,7 @@ STORE="DEMO-001"
 
 say() { printf '\n\033[1m== %s ==\033[0m\n' "$1"; }
 post() { curl -sS -X POST "$BASE_URL$1" -H 'Content-Type: application/json' -d "$2" -w '\nHTTP %{http_code}\n'; }
+patch() { curl -sS -X PATCH "$BASE_URL$1" -H 'Content-Type: application/json' -d "$2" -w '\nHTTP %{http_code}\n'; }
 put()  { curl -sS -X PUT  "$BASE_URL$1" -H 'Content-Type: application/json' -d "$2" -w '\nHTTP %{http_code}\n'; }
 get()  { curl -fsS "$BASE_URL$1"; }
 first_line() { head -n 1; }
@@ -108,5 +109,19 @@ echo "active region table:"
 table_summary
 echo "sales:"
 sales_summary
+
+say "10. Correct TX-1001 (store/date/amount) with its observed revision"
+get "/api/v1/sales/TX-1001" | python3 -c 'import json,sys; d=json.load(sys.stdin); print("  revision before:", d["revision"])'
+patch /api/v1/sales/TX-1001 '{"revision":1,"store_id":"'$STORE'","business_date":"2024-02-20","amount":"125.00"}'
+
+say "11. Replaying the ORIGINAL import is still a duplicate and does not undo the correction"
+post /api/v1/sales "{\"sales\":[
+  {\"serial_no\":\"TX-1001\",\"store_id\":\"$STORE\",\"business_date\":\"2024-01-10\",\"amount\":\"120.00\"}
+]}"
+echo "TX-1001 now:"
+get "/api/v1/sales/TX-1001"
+
+say "12. Correcting with a stale revision is refused (expect 409 revision_conflict)"
+patch /api/v1/sales/TX-1001 '{"revision":1,"store_id":"'$STORE'","business_date":"2024-02-20","amount":"1.00"}'
 
 say "Done"

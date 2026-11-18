@@ -56,7 +56,6 @@ def create_region_table(
         raise ValidationError("at least one region period is required")
 
     now = utc_now_iso()
-    task: sqlite3.Row | None = None
     try:
         with write_tx(conn):
             ensure_store(conn, store_id)
@@ -174,6 +173,11 @@ def _refresh_counts(conn: sqlite3.Connection, task_id: int, store_id: str) -> No
     )
 
 
+def refresh_counts(conn: sqlite3.Connection, task_id: int, store_id: str) -> None:
+    """Public wrapper so corrections can keep progress counters in sync."""
+    _refresh_counts(conn, task_id, store_id)
+
+
 def scan_batch(
     conn: sqlite3.Connection, task_id: int, batch_size: int
 ) -> StepResult:
@@ -282,6 +286,23 @@ def commit_task(conn: sqlite3.Connection, task_id: int) -> StepResult:
                     (utc_now_iso(), task_id),
                 )
                 return StepResult(task_id, "running", False)
+
+            # A sale corrected into this store may carry an id at or below the
+            # cursor.  Its staged row is written by the correction itself, so
+            # it is already accounted for; a sale that left this store must not
+            # block the commit either.  Drop any staged rows whose sale is no
+            # longer a member of this store, then compare only members.
+            conn.execute(
+                """
+                DELETE FROM backfill_items
+                WHERE task_id = ?
+                  AND NOT EXISTS (
+                      SELECT 1 FROM sales s
+                      WHERE s.id = backfill_items.sales_id AND s.store_id = ?
+                  )
+                """,
+                (task_id, task["store_id"]),
+            )
 
             mismatch = conn.execute(
                 """

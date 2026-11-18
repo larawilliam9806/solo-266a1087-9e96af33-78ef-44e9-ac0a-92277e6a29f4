@@ -86,7 +86,7 @@ def import_sales(conn: sqlite3.Connection, sales: list[NormalisedSale]) -> Impor
             ensure_store(conn, sale.store_id)
             digest = content_hash(sale)
             existing = conn.execute(
-                "SELECT id, content_hash FROM sales WHERE serial_no = ?",
+                "SELECT id, content_hash, revision FROM sales WHERE serial_no = ?",
                 (sale.serial_no,),
             ).fetchone()
             if existing is not None:
@@ -97,6 +97,7 @@ def import_sales(conn: sqlite3.Connection, sales: list[NormalisedSale]) -> Impor
                             "serial_no": sale.serial_no,
                             "status": "duplicate",
                             "region_code": None,
+                            "revision": existing["revision"],
                             "message": "identical sale already imported",
                         }
                     )
@@ -107,6 +108,7 @@ def import_sales(conn: sqlite3.Connection, sales: list[NormalisedSale]) -> Impor
                             "serial_no": sale.serial_no,
                             "status": "rejected",
                             "region_code": None,
+                            "revision": existing["revision"],
                             "message": "serial_no already exists with different content",
                         }
                     )
@@ -121,9 +123,9 @@ def import_sales(conn: sqlite3.Connection, sales: list[NormalisedSale]) -> Impor
                 """
                 INSERT INTO sales(
                     serial_no, store_id, business_date, amount_cents, content_hash,
-                    region_code, attribution_status, attribution_table_id,
+                    revision, region_code, attribution_status, attribution_table_id,
                     imported_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?)
                 """,
                 (
                     sale.serial_no,
@@ -150,6 +152,7 @@ def import_sales(conn: sqlite3.Connection, sales: list[NormalisedSale]) -> Impor
                         "inserted_attributed" if region else "inserted_pending"
                     ),
                     "region_code": region,
+                    "revision": 1,
                     "message": None,
                 }
             )
